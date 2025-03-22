@@ -10,6 +10,7 @@ from supabase import create_client, Client
 from openai import OpenAI
 from datetime import datetime
 from typing import List, Dict, Optional, Any
+from services.evolution_api import EvolutionAPIService, padronizar_telefone
 
 # 🔹 Carregar variáveis de ambiente
 load_dotenv()
@@ -17,6 +18,17 @@ load_dotenv()
 # 🔹 Configurar Logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Inicialize o serviço
+try:
+    evolution_service = EvolutionAPIService()
+    logger.info("✅ Serviço Evolution API inicializado com sucesso")
+except Exception as e:
+    logger.error(f"❌ Erro ao inicializar serviço Evolution API: {str(e)}")
+    # Fallback para métodos antigos
+    evolution_service = None
+
+
 
 # 🔹 Configurar Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -280,17 +292,132 @@ def save_client_data(data):
 @app.post("/webhook")
 async def receive_message(request: Request):
     try:
+        # Obter dados brutos da requisição
         data = await request.json()
-        message = MessageData(**data["body"]["data"])
-
-        sender = message.key["remoteJid"]
-        text = message.text if message.text else ""
-
-        logger.info(f"📩 Mensagem recebida de {sender}: {text}")
-
+        
+        # Logar a estrutura completa para diagnóstico
+        logger.info(f"Dados recebidos no webhook: {json.dumps(data, indent=2)}")
+        
+        # Extrair mensagem e remetente conforme o formato da Evolution API
+        # Existem vários formatos possíveis dependendo do tipo de evento
+        
+        # Verificar se é uma mensagem de texto, estrutura: messages/messages_upsert
+        if "messages" in data:
+            messages = data["messages"]
+            if isinstance(messages, list) and len(messages) > 0:
+                message_data = messages[0]
+                
+                # Extrair número do remetente
+                sender = message_data.get("key", {}).get("remoteJid", "")
+                
+                # Extrair texto da mensagem, pode estar em vários lugares diferentes
+                message_obj = message_data.get("message", {})
+                text = ""
+                
+                if "conversation" in message_obj:
+                    text = message_obj["conversation"]
+                elif "extendedTextMessage" in message_obj:
+                    text = message_obj["extendedTextMessage"].get("text", "")
+                
+                logger.info(f"📩 Mensagem extraída: Remetente={sender}, Texto={text}")
+            else:
+                logger.warning("Array de mensagens vazio ou inválido")
+                return {"status": "error", "message": "Formato de mensagem inválido"}
+        
+        # Verificar formato alternativo (webhook direto)
+        elif "key" in data and "remoteJid" in data["key"]:
+            message_data = data
+            sender = message_data["key"]["remoteJid"]
+            
+            message_obj = message_data.get("message", {})
+            text = ""
+            
+            if "conversation" in message_obj:
+                text = message_obj["conversation"]
+            elif "extendedTextMessage" in message_obj:
+                text = message_obj["extendedTextMessage"].get("text", "")
+            
+            logger.info(f"📩 Mensagem extraída (formato alternativo): Remetente={sender}, Texto={text}")
+        
+        # Verificar outros formatos possíveis
+        elif "data" in data and isinstance(data["data"], dict):
+            message_data = data["data"]
+            
+            # Verificar se contém as informações necessárias
+            if "key" in message_data and "remoteJid" in message_data["key"]:
+                sender = message_data["key"]["remoteJid"]
+                
+                message_obj = message_data.get("message", {})
+                text = ""
+                
+                if "conversation" in message_obj:
+                    text = message_obj["conversation"]
+                elif "extendedTextMessage" in message_obj:
+                    text = message_obj["extendedTextMessage"].get("text", "")
+                
+                logger.info(f"📩 Mensagem extraída (formato data): Remetente={sender}, Texto={text}")
+            else:
+                logger.warning("Dados em formato 'data' sem estrutura válida de mensagem")
+                return {"status": "error", "message": "Dados em formato inválido"}
+        else:
+            # Se nenhum formato conhecido for encontrado, tentar uma busca recursiva
+            logger.warning("Formato de dados desconhecido, tentando busca recursiva")
+            
+            # Função auxiliar para buscar recursivamente
+            def find_message_data(obj, depth=0):
+                if depth > 5:  # Limite para evitar recursão infinita
+                    return None
+                
+                if isinstance(obj, dict):
+                    # Primeiro caso: objeto tem key/remoteJid e message
+                    if "key" in obj and "remoteJid" in obj.get("key", {}) and "message" in obj:
+                        return obj
+                    
+                    # Procurar em todos os campos do objeto
+                    for key, value in obj.items():
+                        result = find_message_data(value, depth + 1)
+                        if result:
+                            return result
+                
+                if isinstance(obj, list):
+                    for item in obj:
+                        result = find_message_data(item, depth + 1)
+                        if result:
+                            return result
+                
+                return None
+            
+            # Tentar encontrar os dados da mensagem
+            message_data = find_message_data(data)
+            
+            if message_data:
+                sender = message_data["key"]["remoteJid"]
+                
+                message_obj = message_data.get("message", {})
+                text = ""
+                
+                if "conversation" in message_obj:
+                    text = message_obj["conversation"]
+                elif "extendedTextMessage" in message_obj:
+                    text = message_obj["extendedTextMessage"].get("text", "")
+                
+                logger.info(f"📩 Mensagem extraída (busca recursiva): Remetente={sender}, Texto={text}")
+            else:
+                logger.error(f"Não foi possível extrair dados da mensagem: {data}")
+                return {"status": "error", "message": "Formato de dados não reconhecido"}
+        
+        # Verificar se temos os dados necessários para continuar
+        if not sender or not text:
+            logger.error("Remetente ou texto da mensagem ausente")
+            return {"status": "error", "message": "Dados incompletos"}
+        
+        logger.info(f"📱 Processando mensagem de {sender}: {text}")
+        
+        # O resto do código continua a partir daqui, com os valores sender e text já extraídos
+        
         if sender == "Julia Atendimento":
             return {"status": "ignored"}
-
+            
         # 📌 Extrair informações da mensagem
         cidade_match = re.search(r"(Teresina|Guadalupe)", text, re.IGNORECASE)
         bairro_match = re.search(r"bairro\s+(\w+)", text, re.IGNORECASE)
@@ -459,33 +586,59 @@ async def receive_message(request: Request):
 
 # 📌 Função para enviar mensagens via API
 def send_text_message(number, text):
-    payload = {"number": number, "text": text}
-    send_request(payload)
+    try:
+        # Usar o novo serviço se disponível
+        if evolution_service:
+            numero_padronizado = padronizar_telefone(number)
+            response = evolution_service.send_text_message(numero_padronizado, text)
+            if response.get("status") != "success":
+                logger.warning(f"Falha ao enviar via Evolution API, tentando método antigo: {response.get('message')}")
+                send_request({"number": number, "text": text})
+            else:
+                logger.info(f"✅ Mensagem enviada com sucesso via Evolution API para {numero_padronizado}")
+        else:
+            # Método antigo como fallback
+            payload = {"number": number, "text": text}
+            send_request(payload)
+    except Exception as e:
+        logger.error(f"Erro ao enviar mensagem: {str(e)}")
+        # Tentar método antigo como último recurso
+        try:
+            payload = {"number": number, "text": text}
+            send_request(payload)
+        except Exception as inner_e:
+            logger.error(f"Falha total no envio de mensagem: {str(inner_e)}")
+            raise
 
-# 📌 Função genérica para envio de requisição
+# 📌 Função genérica para envio de requisição (método antigo)
 def send_request(payload):
     try:
         headers = {"apikey": API_KEY, "Content-Type": "application/json"}
-        # Adicionar mais informações de log para depuração
-        logger.info(f"Enviando payload: {payload}")
-        logger.info(f"Headers: {headers}")
-        logger.info(f"URL da API: {API_URL}")
+        logger.info(f"Enviando mensagem pelo método antigo: {payload}")
         
         response = requests.post(API_URL, json=payload, headers=headers)
-        
-        # Logar resposta completa para depuração
-        logger.info(f"Resposta da API: {response.status_code}, Conteúdo: {response.text}")
-        
         response.raise_for_status()
-        logger.info("✅ Mensagem enviada com sucesso!")
+        logger.info("✅ Mensagem enviada com sucesso pelo método antigo!")
+        return response.json()
     except requests.exceptions.RequestException as e:
-        logger.error(f"Erro ao enviar mensagem: {str(e)}")
-        # Adicionar mais detalhes do erro se disponíveis
+        logger.error(f"Erro ao enviar mensagem pelo método antigo: {str(e)}")
         if hasattr(e, 'response') and e.response:
             logger.error(f"Detalhes do erro: {e.response.text}")
         raise
+
+# 📌 Função para verificar números de WhatsApp
+def verify_whatsapp_numbers(numeros):
+    response = evolution_service.verify_whatsapp_numbers(numeros)
+    if response["status"] != "success":
+        logger.error(f"Erro ao verificar números: {response.get('message', 'Erro desconhecido')}")
+        return []
+    
+    logger.info(f"✅ Verificação de números concluída com sucesso")
+    return response.get("data", {}).get("valid", [])
 
 # 📌 Rodar servidor
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
