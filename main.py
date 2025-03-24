@@ -11,6 +11,7 @@ from openai import OpenAI
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from services.evolution_api import EvolutionAPIService, padronizar_telefone
+from message_processor import MessageProcessor
 
 # 🔹 Carregar variáveis de ambiente
 load_dotenv()
@@ -18,6 +19,10 @@ load_dotenv()
 # 🔹 Configurar Logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Instanciar MessageProcessor
+message_processor = MessageProcessor()
+logger.info("✅ MessageProcessor inicializado com sucesso")
 
 # Inicialize o serviço
 try:
@@ -45,10 +50,6 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # 🔹 Configurar FastAPI
 app = FastAPI()
 
-
-# 🔹 Configurar API de envio de mensagens
-API_URL = "https://evolutionv2.datalabpesquisas.com/message/sendText/agente-n8n-python"
-API_KEY = os.getenv("API_KEY")
 
 # 🔹 Modelo de dados para entrada do Webhook
 class MessageData(BaseModel):
@@ -298,28 +299,68 @@ async def receive_message(request: Request):
         # Logar a estrutura completa para diagnóstico
         logger.info(f"Dados recebidos no webhook: {json.dumps(data, indent=2)}")
         
-        # Extrair mensagem e remetente conforme o formato da Evolution API
-        # Existem vários formatos possíveis dependendo do tipo de evento
-        
-        # Verificar se é uma mensagem de texto, estrutura: messages/messages_upsert
-        if "messages" in data:
-            messages = data["messages"]
+        if "message" in data:
+            messages = data["message"]
             if isinstance(messages, list) and len(messages) > 0:
+                logger.debug(f"📄 Formato de lista de mensagens detectado com {len(messages)} mensagens")
                 message_data = messages[0]
-                
-                # Extrair número do remetente
                 sender = message_data.get("key", {}).get("remoteJid", "")
-                
-                # Extrair texto da mensagem, pode estar em vários lugares diferentes
                 message_obj = message_data.get("message", {})
-                text = ""
                 
-                if "conversation" in message_obj:
-                    text = message_obj["conversation"]
-                elif "extendedTextMessage" in message_obj:
-                    text = message_obj["extendedTextMessage"].get("text", "")
+                logger.debug(f"📄 Estrutura da chave: {json.dumps(message_data.get('key', {}), default=str)}")
+                logger.debug(f"📄 Tipo do objeto message: {type(message_obj)}, Tem dados: {bool(message_obj)}")
+                
+                # Extrair texto da mensagem ou transcrever áudio
+                text = ""
+                if "audioMessage" in message_obj:
+                    logger.debug("🎤 Mensagem de áudio detectada, iniciando transcrição")
+                    audio_data = message_obj["audioMessage"]
+                    text = await message_processor.audio_to_text(audio_data)
+                    if text:
+                        logger.info(f"📢 Áudio transcrito: {text}")
+                    else:
+                        logger.warning("❌ Falha na transcrição do áudio")
+                        text = "Desculpe, não consegui entender o áudio."
+                else:
+                    logger.debug(f"📄 Chaves disponíveis no objeto message: {list(message_obj.keys())}")
+                    if "conversation" in message_obj:
+                        text = message_obj["conversation"]
+                        logger.debug(f"📄 Texto extraído de 'conversation': {text[:50]}...")
+                    elif "extendedTextMessage" in message_obj:
+                        text = message_obj["extendedTextMessage"].get("text", "")
+                        logger.debug(f"📄 Texto extraído de 'extendedTextMessage': {text[:50]}...")
+                    elif "buttonsResponseMessage" in message_obj:
+                        # Extrair texto de respostas de botões
+                        text = message_obj["buttonsResponseMessage"].get("selectedButtonId", "")
+                        logger.debug(f"📄 Resposta de botão detectada: {text}")
+                    elif "templateButtonReplyMessage" in message_obj:
+                        # Extrair texto de respostas de template
+                        text = message_obj["templateButtonReplyMessage"].get("selectedId", "")
+                        logger.debug(f"📄 Resposta de template detectada: {text}")
+                    elif "listResponseMessage" in message_obj:
+                        # Extrair texto de respostas de lista
+                        text = message_obj["listResponseMessage"].get("title", "")
+                        logger.debug(f"📄 Resposta de lista detectada: {text}")
+                    else:
+                        logger.warning("⚠️ Nenhum campo de texto reconhecido encontrado no objeto message")
+                        logger.debug(f"📄 Estrutura completa do objeto message: {json.dumps(message_obj, default=str, indent=2)[:500]}...")
                 
                 logger.info(f"📩 Mensagem extraída: Remetente={sender}, Texto={text}")
+                
+                # Verificação para texto vazio mas com outros dados
+                if not text and message_obj:
+                    logger.warning("⚠️ Texto vazio mas objeto message contém dados")
+                    # Tentar extrair qualquer texto disponível em outros campos
+                    for key, value in message_obj.items():
+                        if isinstance(value, dict) and "text" in value:
+                            text = value["text"]
+                            logger.info(f"📄 Texto alternativo encontrado em {key}: {text}")
+                            break
+                    
+                    # Se ainda estiver vazio, usar um valor padrão para processamento
+                    if not text:
+                        logger.warning("⚠️ Definindo texto padrão para mensagem vazia")
+                        text = "[Mensagem sem texto]"
             else:
                 logger.warning("Array de mensagens vazio ou inválido")
                 return {"status": "error", "message": "Formato de mensagem inválido"}
@@ -338,6 +379,9 @@ async def receive_message(request: Request):
                 text = message_obj["extendedTextMessage"].get("text", "")
             
             logger.info(f"📩 Mensagem extraída (formato alternativo): Remetente={sender}, Texto={text}")
+            # Verificação detalhada dos dados extraídos
+            logger.debug(f"Detalhes do remetente: Tipo={type(sender)}, Vazio={sender == ''}, Valor={sender}")
+            logger.debug(f"Detalhes do texto: Tipo={type(text)}, Vazio={text == ''}, Tamanho={len(text) if text else 0}")
         
         # Verificar outros formatos possíveis
         elif "data" in data and isinstance(data["data"], dict):
@@ -356,8 +400,12 @@ async def receive_message(request: Request):
                     text = message_obj["extendedTextMessage"].get("text", "")
                 
                 logger.info(f"📩 Mensagem extraída (formato data): Remetente={sender}, Texto={text}")
+                # Verificação detalhada dos dados extraídos
+                logger.debug(f"Detalhes do remetente (formato data): Tipo={type(sender)}, Vazio={sender == ''}, Valor={sender}")
+                logger.debug(f"Detalhes do texto (formato data): Tipo={type(text)}, Vazio={text == ''}, Tamanho={len(text) if text else 0}")
             else:
                 logger.warning("Dados em formato 'data' sem estrutura válida de mensagem")
+                logger.debug(f"Estrutura do objeto data: {json.dumps(message_data, indent=2)}")
                 return {"status": "error", "message": "Dados em formato inválido"}
         else:
             # Se nenhum formato conhecido for encontrado, tentar uma busca recursiva
@@ -371,15 +419,21 @@ async def receive_message(request: Request):
                 if isinstance(obj, dict):
                     # Primeiro caso: objeto tem key/remoteJid e message
                     if "key" in obj and "remoteJid" in obj.get("key", {}) and "message" in obj:
+                        logger.debug(f"🔍 Encontrada estrutura de mensagem válida na profundidade {depth}")
                         return obj
                     
                     # Procurar em todos os campos do objeto
                     for key, value in obj.items():
+                        # Log para campos potencialmente importantes
+                        if key in ["key", "message", "data", "messages"]:
+                            logger.debug(f"🔍 Verificando campo potencial '{key}' na profundidade {depth}")
+                        
                         result = find_message_data(value, depth + 1)
                         if result:
                             return result
                 
                 if isinstance(obj, list):
+                    logger.debug(f"🔍 Verificando lista com {len(obj)} itens na profundidade {depth}")
                     for item in obj:
                         result = find_message_data(item, depth + 1)
                         if result:
@@ -388,6 +442,7 @@ async def receive_message(request: Request):
                 return None
             
             # Tentar encontrar os dados da mensagem
+            logger.info("🔍 Iniciando busca recursiva para encontrar estrutura de mensagem")
             message_data = find_message_data(data)
             
             if message_data:
@@ -396,20 +451,35 @@ async def receive_message(request: Request):
                 message_obj = message_data.get("message", {})
                 text = ""
                 
+                logger.debug(f"🔄 Estrutura encontrada na busca recursiva: {json.dumps(message_data.get('key', {}), default=str)}")
+                logger.debug(f"🔄 Objeto message encontrado: {json.dumps(message_obj, default=str, indent=2)[:200]}...")
+                
                 if "conversation" in message_obj:
                     text = message_obj["conversation"]
+                    logger.debug(f"🔄 Texto extraído do campo 'conversation': {text[:50]}...")
                 elif "extendedTextMessage" in message_obj:
                     text = message_obj["extendedTextMessage"].get("text", "")
+                    logger.debug(f"🔄 Texto extraído do campo 'extendedTextMessage': {text[:50]}...")
                 
                 logger.info(f"📩 Mensagem extraída (busca recursiva): Remetente={sender}, Texto={text}")
+                # Verificação detalhada dos dados extraídos
+                logger.debug(f"Detalhes do remetente (busca recursiva): Tipo={type(sender)}, Vazio={sender == ''}, Valor={sender}")
+                logger.debug(f"Detalhes do texto (busca recursiva): Tipo={type(text)}, Vazio={text == ''}, Tamanho={len(text) if text else 0}")
             else:
-                logger.error(f"Não foi possível extrair dados da mensagem: {data}")
+                logger.error(f"Não foi possível extrair dados da mensagem: {json.dumps(data, default=str)[:300]}...")
                 return {"status": "error", "message": "Formato de dados não reconhecido"}
         
         # Verificar se temos os dados necessários para continuar
-        if not sender or not text:
-            logger.error("Remetente ou texto da mensagem ausente")
-            return {"status": "error", "message": "Dados incompletos"}
+        if not sender:
+            logger.error("Remetente ausente no processamento da mensagem")
+            logger.debug(f"Estrutura da mensagem processada: {json.dumps(message_data, default=str, indent=2)}")
+            return {"status": "error", "message": "Dados incompletos: remetente ausente"}
+        
+        if not text:
+            logger.error("Texto da mensagem ausente no processamento")
+            logger.debug(f"Remetente identificado: {sender}")
+            logger.debug(f"Estrutura de message_obj: {json.dumps(message_obj, default=str, indent=2)}")
+            return {"status": "error", "message": "Dados incompletos: texto ausente"}
         
         logger.info(f"📱 Processando mensagem de {sender}: {text}")
         
@@ -441,11 +511,18 @@ async def receive_message(request: Request):
                     "bairro": cliente.get("bairro", ""),
                 }
                 
+                logger.info(f"🔍 Cliente existente encontrado: {cliente.get('nome', 'Sem nome')} - {sender}")
+                logger.debug(f"🔍 Dados do cliente: Cidade={user_data['cidade']}, Bairro={user_data['bairro']}")
+                
                 # Completar com dados da mensagem atual se não existirem
                 if not user_data["cidade"] and cidade:
                     user_data["cidade"] = cidade
+                    logger.debug(f"🔄 Atualizando cidade do cliente para: {cidade}")
                 if not user_data["bairro"] and bairro:
                     user_data["bairro"] = bairro
+                    logger.debug(f"🔄 Atualizando bairro do cliente para: {bairro}")
+            else:
+                logger.info(f"🔍 Cliente novo: {sender}")
         except Exception as e:
             logger.error(f"Erro ao consultar cliente: {str(e)}")
             user_data = {"telefone": sender}
@@ -456,24 +533,40 @@ async def receive_message(request: Request):
         
         # 📌 Verificar cobertura se tiver cidade
         if "cidade" in user_data:
+            logger.info(f"🔍 Verificando cobertura para: Cidade={user_data['cidade']}, Bairro={user_data.get('bairro', 'N/A')}")
             cobertura, planos = verificar_cobertura(
                 user_data["cidade"], 
                 user_data.get("bairro"), 
                 zona
             )
             user_data["cobertura"] = cobertura
+            if cobertura is True:
+                logger.info(f"✅ Cobertura confirmada para {user_data['cidade']}")
+            elif cobertura is False:
+                logger.info(f"❌ Sem cobertura para {user_data['cidade']}")
+            else:
+                logger.info(f"⚠️ Verificação de cobertura inconclusiva para {user_data['cidade']}")
+            
             if planos:
                 user_data["planos"] = planos
+                logger.debug(f"📋 Planos disponíveis: {json.dumps(planos)}")
 
         # 📌 Gerar resposta com o novo contexto e chat memory
+        logger.info(f"💬 Gerando resposta AI para: {sender}")
         resposta_ai = await generate_ai_response(text, user_data, session_id=sender)
         
         # 📌 Enviar resposta pelo WhatsApp
         try:
-            send_text_message(sender, resposta_ai)
+            response = send_text_message(sender, resposta_ai)
+            logger.info(f"✅ Mensagem enviada com sucesso para {sender}")
         except Exception as e:
-            logger.error(f"Falha ao enviar mensagem: {str(e)}")
-            return {"status": "partial_success", "response": resposta_ai}
+            logger.error(f"❌ Falha ao enviar mensagem via Evolution API: {str(e)}")
+            # Informar ao cliente sobre o problema
+            return {
+                "status": "error", 
+                "message": "Falha ao enviar mensagem",
+                "response": resposta_ai
+            }
 
         # 📌 Verificar se a IA indicou que o cadastro está completo
         cadastro_completo = False
@@ -587,44 +680,36 @@ async def receive_message(request: Request):
 # 📌 Função para enviar mensagens via API
 def send_text_message(number, text):
     try:
-        # Usar o novo serviço se disponível
-        if evolution_service:
-            numero_padronizado = padronizar_telefone(number)
-            response = evolution_service.send_text_message(numero_padronizado, text)
-            if response.get("status") != "success":
-                logger.warning(f"Falha ao enviar via Evolution API, tentando método antigo: {response.get('message')}")
-                send_request({"number": number, "text": text})
-            else:
-                logger.info(f"✅ Mensagem enviada com sucesso via Evolution API para {numero_padronizado}")
-        else:
-            # Método antigo como fallback
-            payload = {"number": number, "text": text}
-            send_request(payload)
-    except Exception as e:
-        logger.error(f"Erro ao enviar mensagem: {str(e)}")
-        # Tentar método antigo como último recurso
-        try:
-            payload = {"number": number, "text": text}
-            send_request(payload)
-        except Exception as inner_e:
-            logger.error(f"Falha total no envio de mensagem: {str(inner_e)}")
-            raise
-
-# 📌 Função genérica para envio de requisição (método antigo)
-def send_request(payload):
-    try:
-        headers = {"apikey": API_KEY, "Content-Type": "application/json"}
-        logger.info(f"Enviando mensagem pelo método antigo: {payload}")
+        # Verificar se o texto está vazio
+        if not text or text.strip() == "":
+            logger.error("❌ Texto vazio não pode ser enviado")
+            return {"status": "error", "message": "Texto vazio não pode ser enviado"}
+            
+        # Verificar se o serviço está disponível
+        if not evolution_service:
+            logger.error("❌ Serviço Evolution API não está inicializado")
+            raise Exception("Serviço Evolution API não está inicializado")
+            
+        # Padronizar o número de telefone
+        numero_padronizado = padronizar_telefone(number)
         
-        response = requests.post(API_URL, json=payload, headers=headers)
-        response.raise_for_status()
-        logger.info("✅ Mensagem enviada com sucesso pelo método antigo!")
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erro ao enviar mensagem pelo método antigo: {str(e)}")
-        if hasattr(e, 'response') and e.response:
-            logger.error(f"Detalhes do erro: {e.response.text}")
-        raise
+        # Log detalhado para diagnóstico
+        logger.info(f"📤 Enviando mensagem via Evolution API para {numero_padronizado}")
+        logger.debug(f"📤 Conteúdo da mensagem: {text[:50]}...")
+        
+        # Enviar a mensagem usando o serviço Evolution API
+        response = evolution_service.send_text_message(numero_padronizado, text)
+        
+        # Verificar resposta
+        if response.get("status") != "success":
+            logger.error(f"❌ Falha ao enviar mensagem via Evolution API: {response.get('message')}")
+            raise Exception(f"Falha no envio: {response.get('message')}")
+        
+        logger.info(f"✅ Mensagem enviada com sucesso via Evolution API para {numero_padronizado}")
+        return response
+    except Exception as e:
+        logger.error(f"❌ Erro crítico ao enviar mensagem: {str(e)}")
+        raise  # Propagar o erro para ser tratado pelo chamador
 
 # 📌 Função para verificar números de WhatsApp
 def verify_whatsapp_numbers(numeros):

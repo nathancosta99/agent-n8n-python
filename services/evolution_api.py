@@ -187,18 +187,18 @@ class EvolutionAPIService:
 
             url = f"{self.base_url}/message/sendText/{instance}"
             
+            # Formato correto conforme documentação da Evolution API
             payload = {
                 "number": numero_padronizado,
+                "text": mensagem,  # Usando o campo 'text' em vez de aninhado em textMessage
                 "options": {
                     "delay": 1200,
                     "presence": "composing"
-                },
-                "textMessage": {
-                    "text": mensagem
                 }
             }
 
             logger.info(f"Enviando mensagem via instância {instance} para {numero_padronizado}")
+            logger.debug(f"Payload da requisição: {json.dumps(payload)}")
             
             response = self._make_request(
                 method='POST',
