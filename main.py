@@ -149,7 +149,7 @@ def verificar_cobertura(cidade, bairro=None, zona=None):
                 return None, None  # Retorno especial para indicar que precisamos do bairro
                 
             # Consultar a tabela Clientes_cadastro para verificar cobertura no bairro
-            query = supabase.table("Clientes_cadastro").select("*").eq("cidade", cidade).eq("bairro", bairro).execute()
+            query = supabase.table("clientes_cadastro").select("*").eq("cidade", cidade).eq("bairro", bairro).execute()
             
             # Se não há clientes nesse bairro, provavelmente não há cobertura
             if len(query.data) == 0:
@@ -172,7 +172,7 @@ def verificar_cobertura(cidade, bairro=None, zona=None):
         
         return True, planos
     except Exception as e:
-        logger.error(f"Erro ao verificar cobertura usando Clientes_cadastro: {str(e)}")
+        logger.error(f"Erro ao verificar cobertura usando clientes_cadastro: {str(e)}")
         # Em caso de erro, retornar dados de teste
         if cidade and cidade.lower() in ["teresina", "guadalupe"]:
             planos = {
@@ -282,7 +282,7 @@ def save_client_data(data):
             "data_cadastro": "now()"
         }
         
-        supabase.table("Clientes_cadastro").upsert(cliente_data).execute()
+        supabase.table("clientes_cadastro").upsert(cliente_data).execute()
         logger.info(f"✅ Cadastro do cliente salvo com sucesso: {data['telefone']}")
         return True
     except Exception as e:
@@ -565,7 +565,7 @@ async def receive_message(request: Request):
         # 📌 Verificar cliente existente e extrair informações
         user_data = {}
         try:
-            cliente_query = supabase.table("Clientes_cadastro").select("*").eq("telefone", sender).execute()
+            cliente_query = supabase.table("clientes_cadastro").select("*").eq("telefone", sender).execute()
             if len(cliente_query.data) > 0:
                 # Usar dados do cliente existente
                 cliente = cliente_query.data[0]
