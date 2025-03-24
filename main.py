@@ -315,6 +315,15 @@ async def receive_message(request: Request):
                 if "audioMessage" in message_obj:
                     logger.debug("🎤 Mensagem de áudio detectada, iniciando transcrição")
                     audio_data = message_obj["audioMessage"]
+                    
+                    # Verificar se existe uma representação base64 no webhook
+                    if "base64" in message_obj:
+                        logger.info("🎤 Usando representação base64 direta do webhook")
+                        audio_data["base64"] = message_obj["base64"]
+                    
+                    # Adicionar informações completas para debug
+                    logger.debug(f"🎤 Estrutura completa do audioMessage: {json.dumps(audio_data, default=str)[:500]}...")
+                    
                     text = await message_processor.audio_to_text(audio_data)
                     if text:
                         logger.info(f"📢 Áudio transcrito: {text}")
@@ -394,7 +403,35 @@ async def receive_message(request: Request):
                 message_obj = message_data.get("message", {})
                 text = ""
                 
-                if "conversation" in message_obj:
+                # Detectar e processar áudio no formato data
+                if "audioMessage" in message_obj:
+                    logger.info(f"🎤 Detectada mensagem de áudio no formato 'data'")
+                    logger.debug(f"🎤 Estrutura do audioMessage: {json.dumps(message_obj['audioMessage'], default=str)[:300]}...")
+                    
+                    try:
+                        audio_data = message_obj["audioMessage"]
+                        
+                        # Verificar se existe uma representação base64 no webhook
+                        if "base64" in message_data:
+                            logger.info("🎤 Usando representação base64 direta do formato data")
+                            audio_data["base64"] = message_data["base64"]
+                        elif "base64" in message_obj:
+                            logger.info("🎤 Usando representação base64 do objeto message")
+                            audio_data["base64"] = message_obj["base64"]
+                        
+                        logger.info(f"🎤 Iniciando transcrição de áudio (formato data)")
+                        text = await message_processor.audio_to_text(audio_data)
+                        
+                        if text:
+                            logger.info(f"🎤 Áudio transcrito com sucesso (formato data): {text}")
+                        else:
+                            logger.warning("❌ Falha na transcrição do áudio (formato data)")
+                            text = "Desculpe, não consegui entender o áudio."
+                    except Exception as audio_err:
+                        logger.error(f"❌ Erro ao processar mensagem de áudio (formato data): {str(audio_err)}")
+                        logger.exception("Detalhes do erro:")
+                        text = "Desculpe, houve um erro ao processar o áudio."
+                elif "conversation" in message_obj:
                     text = message_obj["conversation"]
                 elif "extendedTextMessage" in message_obj:
                     text = message_obj["extendedTextMessage"].get("text", "")
@@ -454,7 +491,35 @@ async def receive_message(request: Request):
                 logger.debug(f"🔄 Estrutura encontrada na busca recursiva: {json.dumps(message_data.get('key', {}), default=str)}")
                 logger.debug(f"🔄 Objeto message encontrado: {json.dumps(message_obj, default=str, indent=2)[:200]}...")
                 
-                if "conversation" in message_obj:
+                # Verificar se contém uma mensagem de áudio
+                if "audioMessage" in message_obj:
+                    logger.info(f"🎤 Detectada mensagem de áudio na busca recursiva")
+                    logger.debug(f"🎤 Estrutura do audioMessage (busca recursiva): {json.dumps(message_obj['audioMessage'], default=str)[:300]}...")
+                    
+                    try:
+                        audio_data = message_obj["audioMessage"]
+                        
+                        # Verificar se existe uma representação base64 no webhook
+                        if "base64" in message_data:
+                            logger.info("🎤 Usando representação base64 direta na busca recursiva")
+                            audio_data["base64"] = message_data["base64"]
+                        elif "base64" in message_obj:
+                            logger.info("🎤 Usando representação base64 do objeto message (busca recursiva)")
+                            audio_data["base64"] = message_obj["base64"]
+                        
+                        logger.info(f"🎤 Iniciando transcrição de áudio (busca recursiva)")
+                        text = await message_processor.audio_to_text(audio_data)
+                        
+                        if text:
+                            logger.info(f"🎤 Áudio transcrito com sucesso (busca recursiva): {text}")
+                        else:
+                            logger.warning("❌ Falha na transcrição do áudio (busca recursiva)")
+                            text = "Desculpe, não consegui entender o áudio."
+                    except Exception as audio_err:
+                        logger.error(f"❌ Erro ao processar mensagem de áudio (busca recursiva): {str(audio_err)}")
+                        logger.exception("Detalhes do erro:")
+                        text = "Desculpe, houve um erro ao processar o áudio."
+                elif "conversation" in message_obj:
                     text = message_obj["conversation"]
                     logger.debug(f"🔄 Texto extraído do campo 'conversation': {text[:50]}...")
                 elif "extendedTextMessage" in message_obj:
