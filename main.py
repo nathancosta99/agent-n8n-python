@@ -324,7 +324,7 @@ async def receive_message(request: Request):
                     # Adicionar informações completas para debug
                     logger.debug(f"🎤 Estrutura completa do audioMessage: {json.dumps(audio_data, default=str)[:500]}...")
                     
-                    text = await message_processor.audio_to_text(audio_data)
+                    text = await message_processor.audio_to_text_n8n(audio_data)
                     if text:
                         logger.info(f"📢 Áudio transcrito: {text}")
                     else:
@@ -420,7 +420,7 @@ async def receive_message(request: Request):
                             audio_data["base64"] = message_obj["base64"]
                         
                         logger.info(f"🎤 Iniciando transcrição de áudio (formato data)")
-                        text = await message_processor.audio_to_text(audio_data)
+                        text = await message_processor.audio_to_text_n8n(audio_data)
                         
                         if text:
                             logger.info(f"🎤 Áudio transcrito com sucesso (formato data): {text}")
@@ -508,7 +508,7 @@ async def receive_message(request: Request):
                             audio_data["base64"] = message_obj["base64"]
                         
                         logger.info(f"🎤 Iniciando transcrição de áudio (busca recursiva)")
-                        text = await message_processor.audio_to_text(audio_data)
+                        text = await message_processor.audio_to_text_n8n(audio_data)
                         
                         if text:
                             logger.info(f"🎤 Áudio transcrito com sucesso (busca recursiva): {text}")

@@ -279,3 +279,88 @@ class MessageProcessor:
             logger.error(f"❌ Erro geral na conversão de áudio para texto: {str(e)}")
             logger.exception("Stacktrace do erro:")
             return None
+    
+
+    
+    async def audio_to_text_n8n(self, audio_data: dict) -> Optional[str]:
+        """
+        Envia o áudio para o webhook do n8n para transcrição.
+        Usa o método direto como fallback em caso de falha.
+        """
+        try:
+            logger.info("🎤 Iniciando transcrição de áudio via n8n")
+            
+            # Verificar se temos a URL do webhook do n8n
+            n8n_webhook_url = os.getenv("N8N_WEBHOOK_URL")
+            if not n8n_webhook_url:
+                logger.warning("⚠️ URL do webhook do n8n não configurada, usando método direto")
+                return await self.audio_to_text(audio_data)
+            
+            # Verificar se temos base64 nos dados
+            base64_data = None
+            if "base64" in audio_data:
+                base64_data = audio_data["base64"]
+            elif "ptt" in audio_data and "data" in audio_data["ptt"]:
+                base64_data = audio_data["ptt"]["data"]
+            elif "body" in audio_data:
+                try:
+                    # Assume que body pode conter base64
+                    base64_data = audio_data["body"]
+                except Exception:
+                    pass
+            
+            # Se não temos base64, retornar ao método original
+            if not base64_data:
+                logger.warning("⚠️ Dados base64 não encontrados, usando método direto")
+                return await self.audio_to_text(audio_data)
+            
+            # Preparar payload para o n8n
+            payload = {
+                "body": {
+                    "data": {
+                        "message": {
+                            "base64": base64_data
+                        }
+                    }
+                }
+            }
+            
+            # Enviar para o n8n
+            logger.info(f"🎤 Enviando áudio para transcrição via n8n: {n8n_webhook_url}")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    n8n_webhook_url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"}
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    logger.info("🎤 Resposta recebida do n8n")
+                    logger.debug(f"🎤 Resposta completa: {json.dumps(result, default=str)}")
+                    
+                    # CORREÇÃO: Verificar se o resultado é uma lista e extrair o objeto de texto
+                    if isinstance(result, list) and len(result) > 0 and "text" in result[0]:
+                        text = result[0]["text"]
+                        logger.info(f"🎤 Texto transcrito via n8n: {text}")
+                        return text
+                    # Manter a verificação original como fallback
+                    elif "text" in result:
+                        text = result["text"]
+                        logger.info(f"🎤 Texto transcrito via n8n: {text}")
+                        return text
+                    else:
+                        logger.warning(f"⚠️ Formato de resposta do n8n inesperado: {json.dumps(result, default=str)[:200]}, usando método direto")
+                        return await self.audio_to_text(audio_data)
+                else:
+                    logger.error(f"❌ Erro na resposta do n8n: {response.status_code} - {response.text}")
+                    # Fallback para o método direto
+                    logger.info("🔄 Usando método direto como fallback")
+                    return await self.audio_to_text(audio_data)
+                    
+        except Exception as e:
+            logger.error(f"❌ Erro na transcrição via n8n: {str(e)}")
+            logger.exception("Detalhes do erro:")
+            # Fallback para o método direto
+            logger.info("🔄 Usando método direto como fallback após erro")
+            return await self.audio_to_text(audio_data)
