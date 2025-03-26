@@ -148,8 +148,8 @@ def verificar_cobertura(cidade, bairro=None, zona=None):
                 logger.info("Bairro não especificado para Teresina")
                 return None, None  # Retorno especial para indicar que precisamos do bairro
                 
-            # Consultar a tabela Clientes_cadastro para verificar cobertura no bairro
-            query = supabase.table("clientes_cadastro").select("*").eq("cidade", cidade).eq("bairro", bairro).execute()
+            # Consultar a tabela cliente_cadastro para verificar cobertura no bairro
+            query = supabase.table("cliente_cadastro").select("*").eq("cidade", cidade).eq("bairro", bairro).execute()
             
             # Se não há clientes nesse bairro, provavelmente não há cobertura
             if len(query.data) == 0:
@@ -172,7 +172,7 @@ def verificar_cobertura(cidade, bairro=None, zona=None):
         
         return True, planos
     except Exception as e:
-        logger.error(f"Erro ao verificar cobertura usando clientes_cadastro: {str(e)}")
+        logger.error(f"Erro ao verificar cobertura usando cliente_cadastro: {str(e)}")
         # Em caso de erro, retornar dados de teste
         if cidade and cidade.lower() in ["teresina", "guadalupe"]:
             planos = {
@@ -264,10 +264,17 @@ Em Guadalupe, basta saber se o cliente deseja contratar para zona urbana ou zona
         logger.error(f"Erro ao chamar OpenAI: {str(e)}")
         return "Não consegui processar sua solicitação."
 
+def is_cadastro_completo(user_data: Dict[str, Any]) -> bool:
+    campos_obrigatorios = ["nome", "cpf", "telefone", "cidade", "bairro", "plano_escolhido"]
+    return all(user_data.get(campo) for campo in campos_obrigatorios)
+
 # 📌 Função para salvar cadastro do cliente
 def save_client_data(data):
     try:
-        # Salvar dados completos do cliente
+        if not is_cadastro_completo(data):
+            logger.warning("❌ Tentativa de salvar cadastro incompleto. A operação foi ignorada.")
+            return False
+
         cliente_data = {
             "telefone": data["telefone"],
             "nome": data.get("nome", ""),
@@ -278,16 +285,16 @@ def save_client_data(data):
             "bairro": data.get("bairro", ""),
             "endereco": data.get("endereco", ""),
             "plano_escolhido": data.get("plano_escolhido", ""),
-            "status": "pendente_instalacao",
-            "data_cadastro": "now()"
+            "status": "pendente_instalacao"
         }
-        
-        supabase.table("clientes_cadastro").upsert(cliente_data).execute()
+
+        supabase.table("cliente_cadastro").upsert(cliente_data).execute()
         logger.info(f"✅ Cadastro do cliente salvo com sucesso: {data['telefone']}")
         return True
     except Exception as e:
         logger.error(f"Erro ao salvar cadastro do cliente: {str(e)}")
         return False
+
 
 # 📌 Webhook para receber mensagens
 @app.post("/webhook")
@@ -565,7 +572,7 @@ async def receive_message(request: Request):
         # 📌 Verificar cliente existente e extrair informações
         user_data = {}
         try:
-            cliente_query = supabase.table("clientes_cadastro").select("*").eq("telefone", sender).execute()
+            cliente_query = supabase.table("cliente_cadastro").select("*").eq("telefone", sender).execute()
             if len(cliente_query.data) > 0:
                 # Usar dados do cliente existente
                 cliente = cliente_query.data[0]
@@ -704,37 +711,51 @@ async def receive_message(request: Request):
         
         # 📌 Salvar no Supabase
         try:
-            # Salvar mensagem
             mensagem_data = {
                 "telefone": sender, 
                 "mensagem": text, 
                 "resposta": resposta_ai,
-                "data_hora": "now()"
+                "data_hora": datetime.now().isoformat()
             }
-            supabase.table("mensagens").insert(mensagem_data).execute()
-            
-            # Sempre atualizar os dados parciais do cliente
-            cliente_update = {
-                "telefone": sender,
-                "ultima_interacao": "now()"
-            }
-            
-            # Adicionar todos os dados disponíveis
-            for campo in ["nome", "cpf", "cidade", "bairro", "plano_escolhido"]:
-                if campo in user_data and user_data[campo]:
-                    cliente_update[campo] = user_data[campo]
-            
-            # Upsert para atualizar/criar registro com dados parciais
-            supabase.table("Clientes_cadastro").upsert(cliente_update).execute()
-            
-            # Salvar cadastro completo se todas as verificações passarem
-            if cadastro_completo:
+            if is_cadastro_completo(user_data):
+                supabase.table("mensagens").insert(mensagem_data).execute()
+                logger.info("✅ Mensagem registrada com sucesso")
+            else:
+                logger.info("⏸️ Mensagem não registrada por cadastro incompleto")
+
+            logger.info("✅ Mensagem registrada com sucesso")
+        except Exception as e:
+            logger.warning(f"⚠️ Não foi possível registrar a mensagem (tabela pode não existir): {str(e)}")
+
+        # Atualizar ou inserir cliente SOMENTE SE cadastro estiver completo
+        if is_cadastro_completo(user_data):
+            try:
+                cliente_update = {
+                    "telefone": sender      
+                }
+
+                for campo in ["nome", "cpf", "cidade", "bairro", "plano_escolhido"]:
+                    if campo in user_data and user_data[campo]:
+                        cliente_update[campo] = user_data[campo]
+
+                supabase.table("cliente_cadastro").upsert(cliente_update).execute()
+                logger.info("✅ Dados do cliente salvos/atualizados")
+            except Exception as e:
+                logger.error(f"❌ Erro ao salvar/atualizar cliente: {str(e)}")
+        else:
+            logger.info("⏸️ Dados ainda incompletos. Cadastro não salvo.")
+
+
+
+        # Cadastro completo
+        if cadastro_completo:
+            try:
                 logger.info(f"✅ Cadastro completo detectado para {sender}")
                 user_data["status"] = "pendente_instalacao"
                 save_client_data(user_data)
-                logger.info(f"✅ Dados completos salvos para instalação!")
-        except Exception as e:
-            logger.error(f"Falha ao salvar no Supabase: {str(e)}")
+            except Exception as e:
+                logger.error(f"❌ Falha ao salvar cadastro completo: {str(e)}")
+
 
         return {"status": "success", "response": resposta_ai}
     
